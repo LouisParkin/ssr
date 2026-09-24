@@ -22,6 +22,7 @@ option(ENABLE_JACK_METADATA "Use the JACK metadata API. May not work with very o
 option(WITH_OPENGL_RECORDING "Build with OpenGL recording support." TRUE)
 option(WITH_V4L2 "Build with V4L2 support." TRUE)
 option(WITH_PIPEWIRE "Build with PipeWire support." TRUE)
+option(WITH_PORTAL "Build with XDG Desktop Portal support (in-app screen/window selection for Wayland, via PipeWire). Requires WITH_PIPEWIRE and Qt5/Qt6 (QtDBus)." ${WITH_PIPEWIRE})
 option(WITH_ALSA "Build with ALSA support." TRUE)
 option(WITH_PULSEAUDIO "Build with PulseAudio support." TRUE)
 option(WITH_JACK "Build with JACK support." TRUE)

@@ -16,6 +16,14 @@ if(WITH_PIPEWIRE)
 	find_package(PipeWire REQUIRED)
 	find_package(SPA REQUIRED)
 endif()
+if(WITH_PORTAL)
+	if(NOT WITH_PIPEWIRE)
+		message(FATAL_ERROR "WITH_PORTAL requires WITH_PIPEWIRE to be enabled.")
+	endif()
+	if(NOT (WITH_QT5 OR WITH_QT6))
+		message(FATAL_ERROR "WITH_PORTAL requires WITH_QT5 or WITH_QT6 (QtDBus is not available for Qt4).")
+	endif()
+endif()
 if(WITH_ALSA)
 	find_package(ALSA REQUIRED)
 endif()
@@ -28,8 +36,14 @@ endif()
 
 if(WITH_QT6)
 	find_package(Qt6 6.2 COMPONENTS Core Gui Widgets REQUIRED)
+	if(WITH_PORTAL)
+		find_package(Qt6 6.2 COMPONENTS DBus REQUIRED)
+	endif()
 elseif(WITH_QT5)
 	find_package(Qt5 5.7 COMPONENTS Core Gui Widgets X11Extras REQUIRED)
+	if(WITH_PORTAL)
+		find_package(Qt5 5.7 COMPONENTS DBus REQUIRED)
+	endif()
 else()
 	find_package(Qt4 4.8 COMPONENTS QtGui REQUIRED)
 endif()
@@ -107,6 +121,8 @@ set(sources
 	common/ScreenScaling.cpp
 	common/ScreenScaling.h
 	common/TempBuffer.h
+	common/XdgDesktopPortal.cpp
+	common/XdgDesktopPortal.h
 	GUI/AudioPreviewer.cpp
 	GUI/AudioPreviewer.h
 	GUI/DialogGLInject.cpp
@@ -177,6 +193,9 @@ if(WITH_QT6)
 		Qt6::Gui
 		Qt6::Widgets
 	)
+	if(WITH_PORTAL)
+		list(APPEND QT_LIBS Qt6::DBus)
+	endif()
 elseif(WITH_QT5)
 	qt5_add_resources(res_output ${res_input})
 	set(QT_LIBS
@@ -185,6 +204,9 @@ elseif(WITH_QT5)
 		Qt5::Widgets
 		Qt5::X11Extras
 	)
+	if(WITH_PORTAL)
+		list(APPEND QT_LIBS Qt5::DBus)
+	endif()
 else()
 	qt4_add_resources(res_output ${res_input})
 	set(QT_LIBS
@@ -249,6 +271,7 @@ target_compile_definitions(simplescreenrecorder PRIVATE
 	-DSSR_USE_OPENGL_RECORDING=$<BOOL:${WITH_OPENGL_RECORDING}>
 	-DSSR_USE_V4L2=$<BOOL:${WITH_V4L2}>
 	-DSSR_USE_PIPEWIRE=$<BOOL:${WITH_PIPEWIRE}>
+	-DSSR_USE_PORTAL=$<BOOL:${WITH_PORTAL}>
 	-DSSR_USE_ALSA=$<BOOL:${WITH_ALSA}>
 	-DSSR_USE_PULSEAUDIO=$<BOOL:${WITH_PULSEAUDIO}>
 	-DSSR_USE_JACK=$<BOOL:${WITH_JACK}>

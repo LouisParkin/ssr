@@ -705,6 +705,32 @@ void PageRecord::StartPage() {
 		}
 #endif
 
+#if SSR_USE_PIPEWIRE
+		// PipeWire streams (and portal-granted file descriptors) are expensive to (re-)negotiate and, in portal
+		// mode, single-use, so the input is started now and kept running for the entire page lifetime rather
+		// than being recreated on every preview/recording start-stop cycle (same as GLInject and JACK above).
+		if(m_video_backend == PageInput::VIDEO_BACKEND_PIPEWIRE) {
+			int portal_fd = -1;
+#if SSR_USE_PORTAL
+			portal_fd = page_input->TakeVideoPipeWireFd();
+#endif
+			if(portal_fd >= 0) {
+				bool ok = false;
+				uint32_t portal_node_id = m_pipewire_source.toUInt(&ok);
+				if(!ok)
+					throw PipeWireException();
+				m_pipewire_input.reset(new PipeWireInput(portal_fd, portal_node_id, m_video_in_width, m_video_in_height, m_video_frame_rate));
+			} else {
+				m_pipewire_input.reset(new PipeWireInput(m_pipewire_source, m_video_in_width, m_video_in_height, m_video_frame_rate));
+			}
+			if(!m_pipewire_input->WaitUntilFormatKnown(5000)) {
+				Logger::LogError("[PageRecord::StartPage] " + tr("Error: Timed out while waiting for the PipeWire stream format."));
+				throw PipeWireException();
+			}
+			m_pipewire_input->GetCurrentSize(&m_video_in_width, &m_video_in_height);
+		}
+#endif
+
 	} catch(...) {
 		Logger::LogError("[PageRecord::StartPage] " + tr("Error: Something went wrong during initialization."));
 #if SSR_USE_OPENGL_RECORDING
@@ -712,6 +738,9 @@ void PageRecord::StartPage() {
 #endif
 #if SSR_USE_JACK
 		m_jack_input.reset();
+#endif
+#if SSR_USE_PIPEWIRE
+		m_pipewire_input.reset();
 #endif
 	}
 
@@ -773,6 +802,11 @@ void PageRecord::StopPage(bool save) {
 #if SSR_USE_JACK
 	// stop JACK input
 	m_jack_input.reset();
+#endif
+
+#if SSR_USE_PIPEWIRE
+	// stop PipeWire input (it was started when the page was started)
+	m_pipewire_input.reset();
 #endif
 
 	Logger::LogInfo("[PageRecord::StopPage] " + tr("Stopped page."));
@@ -967,12 +1001,7 @@ void PageRecord::StartInput() {
 			m_v4l2_input->GetCurrentSize(&m_video_in_width, &m_video_in_height);
 		}
 #endif
-#if SSR_USE_PIPEWIRE
-		if(m_video_backend == PageInput::VIDEO_BACKEND_PIPEWIRE) {
-			m_pipewire_input.reset(new PipeWireInput(m_pipewire_source, m_video_in_width, m_video_in_height, m_video_frame_rate));
-			m_pipewire_input->GetCurrentSize(&m_video_in_width, &m_video_in_height);
-		}
-#endif
+		// PipeWire input was already started when the page was started
 
 		// start the audio input
 		if(m_audio_enabled) {
@@ -1001,9 +1030,7 @@ void PageRecord::StartInput() {
 #if SSR_USE_V4L2
 		m_v4l2_input.reset();
 #endif
-#if SSR_USE_PIPEWIRE
-		m_pipewire_input.reset();
-#endif
+		// PipeWire input shouldn't stop until the page stops
 #if SSR_USE_ALSA
 		m_alsa_input.reset();
 #endif
@@ -1032,9 +1059,7 @@ void PageRecord::StopInput() {
 #if SSR_USE_V4L2
 	m_v4l2_input.reset();
 #endif
-#if SSR_USE_PIPEWIRE
-	m_pipewire_input.reset();
-#endif
+	// PipeWire input shouldn't stop until the page stops
 #if SSR_USE_ALSA
 	m_alsa_input.reset();
 #endif
