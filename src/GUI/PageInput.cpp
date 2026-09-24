@@ -1372,7 +1372,7 @@ int PageInput::TakeVideoPipeWireFd() {
 
 void PageInput::OnSelectPipeWireSourcePortal() {
 	m_label_video_pipewire_portal_status->setText(tr("Waiting for the desktop portal ..."));
-	XdgDesktopPortal::GetInstance()->RequestSource(XdgDesktopPortal::SOURCETYPE_MONITOR);
+	XdgDesktopPortal::GetInstance()->RequestSource(XdgDesktopPortal::SOURCETYPE_ANY);
 }
 
 void PageInput::OnPipeWireSourceReady(int pipewire_fd, quint32 node_id, int width, int height) {

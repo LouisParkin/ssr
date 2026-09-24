@@ -51,6 +51,9 @@ public:
 		SOURCETYPE_WINDOW  = 2,
 	};
 
+	// Common combinations, usable directly as a RequestSource() type mask.
+	static const uint SOURCETYPE_ANY = SOURCETYPE_MONITOR | SOURCETYPE_WINDOW;
+
 private:
 	enum enum_state {
 		STATE_IDLE,
@@ -74,7 +77,7 @@ private:
 	uint m_token_counter;
 	uint m_generation; // bumped on every RequestSource()/Cancel() to invalidate replies from a superseded request
 	enum_state m_state;
-	enum_sourcetype m_requested_type;
+	uint m_requested_types; // bitmask of enum_sourcetype values
 	QString m_session_handle; // object path of the org.freedesktop.portal.Session, as returned (as a string) by CreateSession
 	QString m_active_request_path;
 	bool m_session_closed_subscribed;
@@ -89,8 +92,9 @@ public:
 	inline bool IsActive() { return m_state != STATE_IDLE; }
 
 	// Starts a new screen/window selection, cancelling anything in progress.
+	// types is a bitmask of enum_sourcetype values (e.g. SOURCETYPE_ANY).
 	// The result is delivered asynchronously through the signals below.
-	void RequestSource(enum_sourcetype type);
+	void RequestSource(uint types);
 
 	// Cancels any request in progress and closes the active session (if any).
 	void Cancel();

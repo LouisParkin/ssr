@@ -50,7 +50,7 @@ XdgDesktopPortal::XdgDesktopPortal()
 	m_token_counter = 0;
 	m_generation = 0;
 	m_state = STATE_IDLE;
-	m_requested_type = SOURCETYPE_MONITOR;
+	m_requested_types = SOURCETYPE_ANY;
 	m_session_closed_subscribed = false;
 
 }
@@ -116,14 +116,14 @@ void XdgDesktopPortal::QueryCapabilities(uint *out_available_types, uint *out_av
 	}
 }
 
-void XdgDesktopPortal::RequestSource(enum_sourcetype type) {
+void XdgDesktopPortal::RequestSource(uint types) {
 
 	// cancel/close anything that was in progress before
 	Cancel();
 
 	Logger::LogInfo("[XdgDesktopPortal::RequestSource] " + tr("Requesting screen/window selection from the desktop portal ..."));
 
-	m_requested_type = type;
+	m_requested_types = types;
 	CallCreateSession();
 
 }
@@ -209,7 +209,7 @@ void XdgDesktopPortal::CallSelectSources() {
 	uint available_types, available_cursor_modes;
 	QueryCapabilities(&available_types, &available_cursor_modes);
 
-	uint types = (uint) m_requested_type & available_types;
+	uint types = m_requested_types & available_types;
 	if(types == 0)
 		types = available_types; // requested type not advertised, let the portal decide what it can offer
 
