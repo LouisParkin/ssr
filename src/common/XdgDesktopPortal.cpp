@@ -22,12 +22,14 @@ along with SimpleScreenRecorder.  If not, see <http://www.gnu.org/licenses/>.
 #if SSR_USE_PORTAL
 
 #include "Logger.h"
+#include "PortalParent.h"
 
 #include <QDBusArgument>
 #include <QDBusObjectPath>
 #include <QDBusPendingCall>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
+#include <QDBusReply>
 #include <QDBusUnixFileDescriptor>
 
 #include <fcntl.h>
@@ -51,6 +53,7 @@ XdgDesktopPortal::XdgDesktopPortal()
 	m_generation = 0;
 	m_state = STATE_IDLE;
 	m_requested_types = SOURCETYPE_ANY;
+	m_record_cursor = true;
 	m_session_closed_subscribed = false;
 
 }
@@ -87,36 +90,33 @@ void XdgDesktopPortal::UnsubscribeRequest(const QString& path, const char *slot)
 	m_bus.disconnect(SERVICE_NAME, path, INTERFACE_REQUEST, QStringLiteral("Response"), this, slot);
 }
 
-void XdgDesktopPortal::QueryCapabilities(uint *out_available_types, uint *out_available_cursor_modes) {
-	// Defaults if the properties can't be read (older portal, or read failure): assume monitor
-	// capture and hidden cursor are supported, since these are the baseline required by the spec.
+void XdgDesktopPortal::QueryCapabilities(uint *out_available_types, uint *out_available_cursor_modes, uint *out_version) {
+	// Keep the existing defaults when properties are missing or cannot be read.
 	*out_available_types = SOURCETYPE_MONITOR | SOURCETYPE_WINDOW;
 	*out_available_cursor_modes = 1; // Hidden
+	*out_version = 1;
 
-	QDBusMessage msg = QDBusMessage::createMethodCall(SERVICE_NAME, OBJECT_PATH, INTERFACE_PROPERTIES, QStringLiteral("Get"));
-	msg << INTERFACE_SCREENCAST << QStringLiteral("AvailableSourceTypes");
-	QDBusMessage reply = m_bus.call(msg, QDBus::Block, 1000);
-	if(reply.type() == QDBusMessage::ReplyMessage && !reply.arguments().isEmpty()) {
-		QVariant v = reply.arguments().at(0).value<QDBusVariant>().variant();
-		bool ok = false;
-		uint types = v.toUInt(&ok);
-		if(ok && types != 0)
-			*out_available_types = types;
-	}
+	QDBusMessage msg = QDBusMessage::createMethodCall(SERVICE_NAME, OBJECT_PATH, INTERFACE_PROPERTIES, QStringLiteral("GetAll"));
+	msg << INTERFACE_SCREENCAST;
+	QDBusReply<QVariantMap> reply = m_bus.call(msg, QDBus::Block, 500);
+	if(!reply.isValid())
+		return;
 
-	msg = QDBusMessage::createMethodCall(SERVICE_NAME, OBJECT_PATH, INTERFACE_PROPERTIES, QStringLiteral("Get"));
-	msg << INTERFACE_SCREENCAST << QStringLiteral("AvailableCursorModes");
-	reply = m_bus.call(msg, QDBus::Block, 1000);
-	if(reply.type() == QDBusMessage::ReplyMessage && !reply.arguments().isEmpty()) {
-		QVariant v = reply.arguments().at(0).value<QDBusVariant>().variant();
-		bool ok = false;
-		uint modes = v.toUInt(&ok);
-		if(ok && modes != 0)
-			*out_available_cursor_modes = modes;
-	}
+	QVariantMap properties = reply.value();
+	*out_version = properties.value(QStringLiteral("version"), 1u).toUInt();
+	bool ok = false;
+	uint types = properties.value(QStringLiteral("AvailableSourceTypes")).toUInt(&ok);
+	if(ok && types != 0)
+		*out_available_types = types;
+	uint modes = properties.value(QStringLiteral("AvailableCursorModes")).toUInt(&ok);
+	if(ok && modes != 0)
+		*out_available_cursor_modes = modes;
 }
 
-void XdgDesktopPortal::RequestSource(uint types) {
+void XdgDesktopPortal::RequestSource(QWidget *parent_window, uint types, bool record_cursor, bool restore) {
+	QString restore_token;
+	if(restore)
+		restore_token = !m_restore_token.isEmpty() ? m_restore_token : m_requested_restore_token;
 
 	// cancel/close anything that was in progress before
 	Cancel();
@@ -124,20 +124,33 @@ void XdgDesktopPortal::RequestSource(uint types) {
 	Logger::LogInfo("[XdgDesktopPortal::RequestSource] " + tr("Requesting screen/window selection from the desktop portal ..."));
 
 	m_requested_types = types;
-	CallCreateSession();
+	m_record_cursor = record_cursor;
+	m_requested_restore_token = restore_token;
+	m_state = STATE_EXPORTING_PARENT;
+	uint generation = m_generation;
+	m_parent = new PortalParent(parent_window, [this, generation](const QString&) {
+		if(generation != m_generation)
+			return;
+		CallCreateSession();
+	});
 
 }
 
 void XdgDesktopPortal::Cancel() {
-	if(m_state == STATE_IDLE && m_session_handle.isEmpty())
-		return;
+	m_restore_token.clear();
+	m_requested_restore_token.clear();
 	++m_generation; // invalidate any pending async replies from this point on
 	if(!m_active_request_path.isEmpty()) {
 		QDBusMessage msg = QDBusMessage::createMethodCall(SERVICE_NAME, m_active_request_path, INTERFACE_REQUEST, QStringLiteral("Close"));
 		m_bus.asyncCall(msg);
+		UnsubscribeRequest(m_active_request_path, SLOT(OnCreateSessionResponse(uint,QVariantMap,QDBusMessage)));
+		UnsubscribeRequest(m_active_request_path, SLOT(OnSelectSourcesResponse(uint,QVariantMap,QDBusMessage)));
+		UnsubscribeRequest(m_active_request_path, SLOT(OnStartResponse(uint,QVariantMap,QDBusMessage)));
 		m_active_request_path.clear();
 	}
 	CloseSession();
+	delete m_parent;
+	m_parent = NULL;
 	m_state = STATE_IDLE;
 }
 
@@ -149,7 +162,7 @@ void XdgDesktopPortal::CallCreateSession() {
 	QString session_token = NewToken();
 	QString path = PredictedRequestPath(token);
 	m_active_request_path = path;
-	SubscribeRequest(path, SLOT(OnCreateSessionResponse(uint,QVariantMap)));
+	SubscribeRequest(path, SLOT(OnCreateSessionResponse(uint,QVariantMap,QDBusMessage)));
 
 	QVariantMap options;
 	options.insert(QStringLiteral("handle_token"), token);
@@ -172,20 +185,23 @@ void XdgDesktopPortal::CallCreateSession() {
 		}
 		QString actual_path = reply.value().path();
 		if(actual_path != path) {
-			UnsubscribeRequest(path, SLOT(OnCreateSessionResponse(uint,QVariantMap)));
+			UnsubscribeRequest(path, SLOT(OnCreateSessionResponse(uint,QVariantMap,QDBusMessage)));
 			m_active_request_path = actual_path;
-			SubscribeRequest(actual_path, SLOT(OnCreateSessionResponse(uint,QVariantMap)));
+			SubscribeRequest(actual_path, SLOT(OnCreateSessionResponse(uint,QVariantMap,QDBusMessage)));
 		}
 	});
 
 }
 
-void XdgDesktopPortal::OnCreateSessionResponse(uint response, const QVariantMap& results) {
+void XdgDesktopPortal::OnCreateSessionResponse(uint response, const QVariantMap& results, const QDBusMessage& message) {
+	if(message.path() != m_active_request_path)
+		return;
 	if(m_state != STATE_CREATING_SESSION)
 		return;
+	UnsubscribeRequest(m_active_request_path, SLOT(OnCreateSessionResponse(uint,QVariantMap,QDBusMessage)));
 	m_active_request_path.clear();
 	if(response == 1) {
-		m_state = STATE_IDLE;
+		Cancel();
 		emit SourceCancelled();
 		return;
 	}
@@ -206,26 +222,38 @@ void XdgDesktopPortal::CallSelectSources() {
 
 	m_state = STATE_SELECTING_SOURCES;
 
-	uint available_types, available_cursor_modes;
-	QueryCapabilities(&available_types, &available_cursor_modes);
+	uint available_types, available_cursor_modes, version;
+	QueryCapabilities(&available_types, &available_cursor_modes, &version);
 
 	uint types = m_requested_types & available_types;
 	if(types == 0)
 		types = available_types; // requested type not advertised, let the portal decide what it can offer
 
-	// Prefer an embedded cursor (bit 2) if supported, otherwise fall back to hidden (bit 1).
-	uint cursor_mode = (available_cursor_modes & 2u) ? 2u : 1u;
+	// Cursor mode is fixed for the session. Do not silently ignore the checkbox.
+	uint cursor_mode = m_record_cursor ? 2u : 1u;
+	if(!(available_cursor_modes & cursor_mode)) {
+		Fail(m_record_cursor ? tr("The desktop does not support recording the cursor.")
+		                    : tr("The desktop does not support hiding the cursor."));
+		return;
+	}
 
 	QString token = NewToken();
 	QString path = PredictedRequestPath(token);
 	m_active_request_path = path;
-	SubscribeRequest(path, SLOT(OnSelectSourcesResponse(uint,QVariantMap)));
+	SubscribeRequest(path, SLOT(OnSelectSourcesResponse(uint,QVariantMap,QDBusMessage)));
 
 	QVariantMap options;
 	options.insert(QStringLiteral("handle_token"), token);
 	options.insert(QStringLiteral("types"), types);
 	options.insert(QStringLiteral("multiple"), false);
 	options.insert(QStringLiteral("cursor_mode"), cursor_mode);
+	if(version >= 4) {
+		options.insert(QStringLiteral("persist_mode"), 1u); // this application lifetime only
+		if(!m_requested_restore_token.isEmpty())
+			options.insert(QStringLiteral("restore_token"), m_requested_restore_token);
+	}
+	// A submitted token cannot be reused, even if this request is cancelled.
+	m_requested_restore_token.clear();
 
 	QDBusMessage msg = QDBusMessage::createMethodCall(SERVICE_NAME, OBJECT_PATH, INTERFACE_SCREENCAST, QStringLiteral("SelectSources"));
 	msg << QVariant::fromValue(QDBusObjectPath(m_session_handle)) << options;
@@ -244,22 +272,24 @@ void XdgDesktopPortal::CallSelectSources() {
 		}
 		QString actual_path = reply.value().path();
 		if(actual_path != path) {
-			UnsubscribeRequest(path, SLOT(OnSelectSourcesResponse(uint,QVariantMap)));
+			UnsubscribeRequest(path, SLOT(OnSelectSourcesResponse(uint,QVariantMap,QDBusMessage)));
 			m_active_request_path = actual_path;
-			SubscribeRequest(actual_path, SLOT(OnSelectSourcesResponse(uint,QVariantMap)));
+			SubscribeRequest(actual_path, SLOT(OnSelectSourcesResponse(uint,QVariantMap,QDBusMessage)));
 		}
 	});
 
 }
 
-void XdgDesktopPortal::OnSelectSourcesResponse(uint response, const QVariantMap& results) {
+void XdgDesktopPortal::OnSelectSourcesResponse(uint response, const QVariantMap& results, const QDBusMessage& message) {
+	if(message.path() != m_active_request_path)
+		return;
 	Q_UNUSED(results);
 	if(m_state != STATE_SELECTING_SOURCES)
 		return;
+	UnsubscribeRequest(m_active_request_path, SLOT(OnSelectSourcesResponse(uint,QVariantMap,QDBusMessage)));
 	m_active_request_path.clear();
 	if(response == 1) {
-		m_state = STATE_IDLE;
-		CloseSession();
+		Cancel();
 		emit SourceCancelled();
 		return;
 	}
@@ -277,15 +307,13 @@ void XdgDesktopPortal::CallStart() {
 	QString token = NewToken();
 	QString path = PredictedRequestPath(token);
 	m_active_request_path = path;
-	SubscribeRequest(path, SLOT(OnStartResponse(uint,QVariantMap)));
+	SubscribeRequest(path, SLOT(OnStartResponse(uint,QVariantMap,QDBusMessage)));
 
 	QVariantMap options;
 	options.insert(QStringLiteral("handle_token"), token);
 
 	QDBusMessage msg = QDBusMessage::createMethodCall(SERVICE_NAME, OBJECT_PATH, INTERFACE_SCREENCAST, QStringLiteral("Start"));
-	// Empty parent_window: the first working capture path doesn't yet export a
-	// real Wayland xdg-foreign surface handle for portal dialog parenting.
-	msg << QVariant::fromValue(QDBusObjectPath(m_session_handle)) << QString() << options;
+	msg << QVariant::fromValue(QDBusObjectPath(m_session_handle)) << m_parent->GetIdentifier() << options;
 
 	uint generation = m_generation;
 	QDBusPendingCall pending = m_bus.asyncCall(msg);
@@ -301,21 +329,23 @@ void XdgDesktopPortal::CallStart() {
 		}
 		QString actual_path = reply.value().path();
 		if(actual_path != path) {
-			UnsubscribeRequest(path, SLOT(OnStartResponse(uint,QVariantMap)));
+			UnsubscribeRequest(path, SLOT(OnStartResponse(uint,QVariantMap,QDBusMessage)));
 			m_active_request_path = actual_path;
-			SubscribeRequest(actual_path, SLOT(OnStartResponse(uint,QVariantMap)));
+			SubscribeRequest(actual_path, SLOT(OnStartResponse(uint,QVariantMap,QDBusMessage)));
 		}
 	});
 
 }
 
-void XdgDesktopPortal::OnStartResponse(uint response, const QVariantMap& results) {
+void XdgDesktopPortal::OnStartResponse(uint response, const QVariantMap& results, const QDBusMessage& message) {
+	if(message.path() != m_active_request_path)
+		return;
 	if(m_state != STATE_STARTING)
 		return;
+	UnsubscribeRequest(m_active_request_path, SLOT(OnStartResponse(uint,QVariantMap,QDBusMessage)));
 	m_active_request_path.clear();
 	if(response == 1) {
-		m_state = STATE_IDLE;
-		CloseSession();
+		Cancel();
 		emit SourceCancelled();
 		return;
 	}
@@ -331,7 +361,6 @@ void XdgDesktopPortal::OnStartResponse(uint response, const QVariantMap& results
 	}
 
 	quint32 node_id = 0;
-	int width = 0, height = 0;
 	bool got_stream = false;
 
 	// Must be const: QDBusArgument has separate const (demarshalling/read) and
@@ -350,15 +379,6 @@ void XdgDesktopPortal::OnStartResponse(uint response, const QVariantMap& results
 		if(!got_stream) {
 			node_id = stream_node_id;
 			got_stream = true;
-			if(stream_props.contains(QStringLiteral("size"))) {
-				QVariant size_variant = stream_props.value(QStringLiteral("size"));
-				if(size_variant.canConvert<QDBusArgument>()) {
-					const QDBusArgument size_arg = size_variant.value<QDBusArgument>();
-					size_arg.beginStructure();
-					size_arg >> width >> height;
-					size_arg.endStructure();
-				}
-			}
 		}
 	}
 	arg.endArray();
@@ -368,13 +388,19 @@ void XdgDesktopPortal::OnStartResponse(uint response, const QVariantMap& results
 		return;
 	}
 
-	CallOpenPipeWireRemote(node_id, width, height);
+	m_restore_token = results.value(QStringLiteral("restore_token")).toString();
+	m_node_id = node_id;
+	m_state = STATE_READY;
+	emit SourceReady();
 
 }
 
-void XdgDesktopPortal::CallOpenPipeWireRemote(quint32 node_id, int width, int height) {
+void XdgDesktopPortal::OpenPipeWireRemote(uint request_id) {
 
-	m_state = STATE_OPENING_PIPEWIRE_REMOTE;
+	if(!HasSource()) {
+		Fail(tr("No screen or window has been selected."));
+		return;
+	}
 
 	QVariantMap options; // no options currently defined
 	QDBusMessage msg = QDBusMessage::createMethodCall(SERVICE_NAME, OBJECT_PATH, INTERFACE_SCREENCAST, QStringLiteral("OpenPipeWireRemote"));
@@ -383,7 +409,7 @@ void XdgDesktopPortal::CallOpenPipeWireRemote(quint32 node_id, int width, int he
 	uint generation = m_generation;
 	QDBusPendingCall pending = m_bus.asyncCall(msg);
 	QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(pending, this);
-	connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, generation, node_id, width, height]() {
+	connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, generation, request_id]() {
 		watcher->deleteLater();
 		if(generation != m_generation)
 			return;
@@ -400,9 +426,7 @@ void XdgDesktopPortal::CallOpenPipeWireRemote(quint32 node_id, int width, int he
 			Fail(tr("Failed to duplicate the PipeWire remote file descriptor."));
 			return;
 		}
-		m_state = STATE_READY;
-		Logger::LogInfo("[XdgDesktopPortal::CallOpenPipeWireRemote] " + tr("Screen/window selection succeeded (PipeWire node %1).").arg(node_id));
-		emit SourceReady(fd, node_id, width, height);
+		emit RemoteReady(fd, m_node_id, request_id);
 	});
 
 }
@@ -410,25 +434,21 @@ void XdgDesktopPortal::CallOpenPipeWireRemote(quint32 node_id, int width, int he
 void XdgDesktopPortal::SubscribeSessionClosed() {
 	if(m_session_closed_subscribed)
 		return;
-	if(m_bus.connect(SERVICE_NAME, m_session_handle, INTERFACE_SESSION, QStringLiteral("Closed"), this, SLOT(OnSessionClosed())))
+	if(m_bus.connect(SERVICE_NAME, m_session_handle, INTERFACE_SESSION, QStringLiteral("Closed"), this, SLOT(OnSessionClosed(QDBusMessage))))
 		m_session_closed_subscribed = true;
 }
 
-void XdgDesktopPortal::OnSessionClosed() {
+void XdgDesktopPortal::OnSessionClosed(const QDBusMessage& message) {
+	if(message.path() != m_session_handle)
+		return;
 	if(m_session_handle.isEmpty())
 		return;
-	bool was_ready = (m_state == STATE_READY);
-	m_session_handle.clear();
-	m_session_closed_subscribed = false;
-	m_state = STATE_IDLE;
-	if(was_ready) {
-		Fail(tr("The screen cast session was closed (permission revoked, or the compositor ended it)."));
-	}
+	Fail(tr("The screen cast session was closed (permission revoked, or the compositor ended it)."));
 }
 
 void XdgDesktopPortal::CloseSession() {
 	if(m_session_closed_subscribed) {
-		m_bus.disconnect(SERVICE_NAME, m_session_handle, INTERFACE_SESSION, QStringLiteral("Closed"), this, SLOT(OnSessionClosed()));
+		m_bus.disconnect(SERVICE_NAME, m_session_handle, INTERFACE_SESSION, QStringLiteral("Closed"), this, SLOT(OnSessionClosed(QDBusMessage)));
 		m_session_closed_subscribed = false;
 	}
 	if(!m_session_handle.isEmpty()) {
@@ -440,8 +460,7 @@ void XdgDesktopPortal::CloseSession() {
 
 void XdgDesktopPortal::Fail(const QString& message) {
 	Logger::LogError("[XdgDesktopPortal] " + message);
-	CloseSession();
-	m_state = STATE_IDLE;
+	Cancel();
 	emit SourceFailed(message);
 }
 

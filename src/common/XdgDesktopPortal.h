@@ -25,18 +25,16 @@ along with SimpleScreenRecorder.  If not, see <http://www.gnu.org/licenses/>.
 #include <QDBusConnection>
 #include <QDBusMessage>
 
+class PortalParent;
+
 // Requests a screen or window to record from the XDG Desktop Portal
 // ScreenCast interface (org.freedesktop.portal.ScreenCast). This is the
 // standard way to obtain screen capture permission and a PipeWire stream
 // under Wayland, where SSR can't access the compositor directly.
 //
-// The flow is: CreateSession -> SelectSources -> Start -> OpenPipeWireRemote,
-// all performed asynchronously through QtDBus. On success, the resulting
-// PipeWire remote file descriptor and node id are delivered through the
-// SourceReady() signal; the receiver takes ownership of the file descriptor
-// (pw_context_connect_fd() takes ownership and closes it, including on
-// failure, so it must not be closed again except on an error path that
-// doesn't reach pw_context_connect_fd()).
+// Selection is retained for the session lifetime. Each capture connection calls
+// OpenPipeWireRemote() to obtain a fresh remote, without selecting again.
+// RemoteReady() transfers FD ownership to its receiver.
 //
 // Only one request/session is active at a time. Starting a new request, or
 // calling Cancel(), invalidates and closes whatever came before.
@@ -57,10 +55,10 @@ public:
 private:
 	enum enum_state {
 		STATE_IDLE,
+		STATE_EXPORTING_PARENT,
 		STATE_CREATING_SESSION,
 		STATE_SELECTING_SOURCES,
 		STATE_STARTING,
-		STATE_OPENING_PIPEWIRE_REMOTE,
 		STATE_READY,
 	};
 
@@ -77,10 +75,15 @@ private:
 	uint m_token_counter;
 	uint m_generation; // bumped on every RequestSource()/Cancel() to invalidate replies from a superseded request
 	enum_state m_state;
+	bool m_record_cursor;
+	QString m_restore_token; // single-use token retained only while SSR runs
+	QString m_requested_restore_token;
+	PortalParent *m_parent = NULL;
 	uint m_requested_types; // bitmask of enum_sourcetype values
 	QString m_session_handle; // object path of the org.freedesktop.portal.Session, as returned (as a string) by CreateSession
 	QString m_active_request_path;
 	bool m_session_closed_subscribed;
+	quint32 m_node_id;
 
 public:
 	XdgDesktopPortal();
@@ -93,17 +96,20 @@ public:
 
 	// Starts a new screen/window selection, cancelling anything in progress.
 	// types is a bitmask of enum_sourcetype values (e.g. SOURCETYPE_ANY).
+	// restore attempts to reuse the previous selection (e.g. after a cursor change).
 	// The result is delivered asynchronously through the signals below.
-	void RequestSource(uint types);
+	void RequestSource(QWidget *parent_window, uint types, bool record_cursor, bool restore = false);
+	inline bool GetRecordCursor() { return m_record_cursor; }
 
 	// Cancels any request in progress and closes the active session (if any).
 	void Cancel();
+	inline bool HasSource() { return m_state == STATE_READY; }
+	void OpenPipeWireRemote(uint request_id);
 
 signals:
-	// A source was selected and is ready to use.
-	// width/height are 0 if the portal did not report a size (the actual
-	// negotiated PipeWire format should be used instead, once known).
-	void SourceReady(int pipewire_fd, quint32 node_id, int width, int height);
+	void SourceReady();
+	// request_id lets the receiver discard replies for an earlier page visit.
+	void RemoteReady(int pipewire_fd, quint32 node_id, uint request_id);
 
 	// The user cancelled the portal's selection dialog.
 	void SourceCancelled();
@@ -120,12 +126,11 @@ private:
 	void SubscribeRequest(const QString& path, const char *slot);
 	void UnsubscribeRequest(const QString& path, const char *slot);
 
-	void QueryCapabilities(uint *out_available_types, uint *out_available_cursor_modes);
+	void QueryCapabilities(uint *out_available_types, uint *out_available_cursor_modes, uint *out_version);
 
 	void CallCreateSession();
 	void CallSelectSources();
 	void CallStart();
-	void CallOpenPipeWireRemote(quint32 node_id, int width, int height);
 
 	void SubscribeSessionClosed();
 	void CloseSession();
@@ -133,10 +138,10 @@ private:
 	void Fail(const QString& message);
 
 private slots:
-	void OnCreateSessionResponse(uint response, const QVariantMap& results);
-	void OnSelectSourcesResponse(uint response, const QVariantMap& results);
-	void OnStartResponse(uint response, const QVariantMap& results);
-	void OnSessionClosed();
+	void OnCreateSessionResponse(uint response, const QVariantMap& results, const QDBusMessage& message);
+	void OnSelectSourcesResponse(uint response, const QVariantMap& results, const QDBusMessage& message);
+	void OnStartResponse(uint response, const QVariantMap& results, const QDBusMessage& message);
+	void OnSessionClosed(const QDBusMessage& message);
 
 };
 

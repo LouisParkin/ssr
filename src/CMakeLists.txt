@@ -48,6 +48,49 @@ else()
 	find_package(Qt4 4.8 COMPONENTS QtGui REQUIRED)
 endif()
 
+# Native Wayland parenting is optional. Portal capture and X11/XWayland
+# parenting only need the public Qt interfaces and QtDBus.
+set(USE_WAYLAND_PARENTING FALSE)
+if(WITH_PORTAL AND WITH_WAYLAND_PARENTING)
+	if(WITH_QT6)
+		if(NOT TARGET Qt6::GuiPrivate)
+			find_package(Qt6GuiPrivate ${Qt6Gui_VERSION} EXACT QUIET)
+		endif()
+		set(PORTAL_GUI_PRIVATE Qt6::GuiPrivate)
+	else()
+		set(PORTAL_GUI_PRIVATE Qt5::GuiPrivate)
+	endif()
+	find_package(PkgConfig QUIET)
+	if(PKG_CONFIG_FOUND)
+		pkg_check_modules(WAYLAND_CLIENT QUIET wayland-client)
+		pkg_check_modules(WAYLAND_PROTOCOLS QUIET wayland-protocols)
+		if(WAYLAND_PROTOCOLS_FOUND)
+			pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
+		endif()
+	endif()
+	find_program(WAYLAND_SCANNER wayland-scanner)
+	if(TARGET ${PORTAL_GUI_PRIVATE} AND WAYLAND_CLIENT_FOUND AND WAYLAND_PROTOCOLS_FOUND AND WAYLAND_SCANNER
+			AND EXISTS "${WAYLAND_PROTOCOLS_DIR}/unstable/xdg-foreign/xdg-foreign-unstable-v2.xml")
+		set(USE_WAYLAND_PARENTING TRUE)
+	else()
+		message(STATUS "Native Wayland portal parenting disabled: Qt GUI private headers or Wayland development tools are unavailable. Portal capture and X11/XWayland parenting remain enabled.")
+	endif()
+endif()
+
+if(USE_WAYLAND_PARENTING)
+	message(STATUS "Native Wayland portal parenting enabled")
+	set(XDG_FOREIGN_XML "${WAYLAND_PROTOCOLS_DIR}/unstable/xdg-foreign/xdg-foreign-unstable-v2.xml")
+	add_custom_command(OUTPUT xdg-foreign-client-protocol.h
+		COMMAND ${WAYLAND_SCANNER} client-header ${XDG_FOREIGN_XML} xdg-foreign-client-protocol.h
+		DEPENDS ${XDG_FOREIGN_XML} VERBATIM)
+	add_custom_command(OUTPUT xdg-foreign-protocol.c
+		COMMAND ${WAYLAND_SCANNER} private-code ${XDG_FOREIGN_XML} xdg-foreign-protocol.c
+		DEPENDS ${XDG_FOREIGN_XML} VERBATIM)
+	set(portal_sources ${CMAKE_CURRENT_BINARY_DIR}/xdg-foreign-client-protocol.h
+		${CMAKE_CURRENT_BINARY_DIR}/xdg-foreign-protocol.c)
+	set_property(SOURCE ${portal_sources} PROPERTY SKIP_AUTOMOC ON)
+endif()
+
 set(sources
 	AV/Input/ALSAInput.cpp
 	AV/Input/ALSAInput.h
@@ -121,6 +164,8 @@ set(sources
 	common/ScreenScaling.cpp
 	common/ScreenScaling.h
 	common/TempBuffer.h
+	common/PortalParent.cpp
+	common/PortalParent.h
 	common/XdgDesktopPortal.cpp
 	common/XdgDesktopPortal.h
 	GUI/AudioPreviewer.cpp
@@ -214,14 +259,21 @@ else()
 	)
 endif()
 
+if(USE_WAYLAND_PARENTING)
+	list(APPEND QT_LIBS ${PORTAL_GUI_PRIVATE})
+endif()
+
 set_property(SOURCE ${res_output} PROPERTY SKIP_AUTOMOC ON)
 
 add_executable(simplescreenrecorder
 	${sources}
 	${res_output}
+	${portal_sources}
 )
 
 target_include_directories(simplescreenrecorder PRIVATE
+	${CMAKE_CURRENT_BINARY_DIR}
+	$<$<BOOL:${USE_WAYLAND_PARENTING}>:${WAYLAND_CLIENT_INCLUDE_DIRS}>
 	${AVFORMAT_INCLUDE_DIRS}
 	${AVCODEC_INCLUDE_DIRS}
 	${AVUTIL_INCLUDE_DIRS}
@@ -246,6 +298,7 @@ target_include_directories(simplescreenrecorder PRIVATE
 )
 
 target_link_libraries(simplescreenrecorder PRIVATE
+	$<$<BOOL:${USE_WAYLAND_PARENTING}>:${WAYLAND_CLIENT_LIBRARIES}>
 	${AVFORMAT_LIBRARIES}
 	${AVCODEC_LIBRARIES}
 	${AVUTIL_LIBRARIES}
@@ -271,6 +324,7 @@ target_compile_definitions(simplescreenrecorder PRIVATE
 	-DSSR_USE_OPENGL_RECORDING=$<BOOL:${WITH_OPENGL_RECORDING}>
 	-DSSR_USE_V4L2=$<BOOL:${WITH_V4L2}>
 	-DSSR_USE_PIPEWIRE=$<BOOL:${WITH_PIPEWIRE}>
+	-DSSR_USE_WAYLAND_PARENTING=$<BOOL:${USE_WAYLAND_PARENTING}>
 	-DSSR_USE_PORTAL=$<BOOL:${WITH_PORTAL}>
 	-DSSR_USE_ALSA=$<BOOL:${WITH_ALSA}>
 	-DSSR_USE_PULSEAUDIO=$<BOOL:${WITH_PULSEAUDIO}>

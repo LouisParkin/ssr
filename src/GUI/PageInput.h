@@ -115,6 +115,9 @@ public:
 #if SSR_USE_PIPEWIRE
 		VIDEO_BACKEND_PIPEWIRE,
 #endif
+#if SSR_USE_PORTAL
+		VIDEO_BACKEND_WAYLAND,
+#endif
 		VIDEO_BACKEND_COUNT // must be last
 	};
 	enum enum_video_x11_area {
@@ -188,8 +191,6 @@ private:
 #if SSR_USE_PORTAL
 	QPushButton *m_pushbutton_video_pipewire_portal;
 	QLabel *m_label_video_pipewire_portal_status;
-	int m_portal_fd; // owned fd from the last successful portal selection, or -1
-	QString m_portal_node_id; // node id (as text) that m_portal_fd belongs to; only valid while it matches the source field
 #endif
 #endif
 	QSpinBox *m_spinbox_video_frame_rate;
@@ -217,9 +218,6 @@ private:
 
 public:
 	PageInput(MainWindow* main_window);
-#if SSR_USE_PORTAL
-	~PageInput();
-#endif
 
 	void LoadSettings(QSettings* settings);
 	void SaveSettings(QSettings* settings);
@@ -268,6 +266,10 @@ private:
 	void LoadPulseAudioSources();
 #endif
 
+#if SSR_USE_PORTAL
+	void SetWaylandStatus(const QString& text);
+#endif
+
 public slots:
 	void OnUpdateRecordingFrame();
 	void OnUpdateVideoAreaFields();
@@ -295,10 +297,10 @@ private slots:
 #endif
 #if SSR_USE_PORTAL
 	void OnSelectPipeWireSourcePortal();
-	void OnPipeWireSourceReady(int pipewire_fd, quint32 node_id, int width, int height);
+	void OnWaylandCursorChanged();
+	void OnPipeWireSourceReady();
 	void OnPipeWireSourceCancelled();
 	void OnPipeWireSourceFailed(QString error_message);
-	void OnPipeWireSourceTextEdited();
 #endif
 	void OnContinue();
 
@@ -321,13 +323,6 @@ public:
 	inline QString GetVideoPipeWireSource() { return m_lineedit_video_pipewire_source->text(); }
 	inline unsigned int GetVideoPipeWireWidth() { return m_spinbox_video_pipewire_width->value(); }
 	inline unsigned int GetVideoPipeWireHeight() { return m_spinbox_video_pipewire_height->value(); }
-#if SSR_USE_PORTAL
-	// Returns and takes ownership of the portal-provided fd for the current PipeWire
-	// source field (transferring it to the caller, who becomes responsible for
-	// closing it, directly or via pw_context_connect_fd()), or -1 if the current
-	// source wasn't obtained through the portal (e.g. manually entered, or already taken).
-	int TakeVideoPipeWireFd();
-#endif
 #endif
 	inline unsigned int GetVideoFrameRate() { return m_spinbox_video_frame_rate->value(); }
 	inline bool GetVideoScalingEnabled() { return m_checkbox_scale->isChecked(); }

@@ -42,6 +42,9 @@ ENUMSTRINGS(PageInput::enum_video_backend) = {
 #if SSR_USE_PIPEWIRE
 	{PageInput::VIDEO_BACKEND_PIPEWIRE, "pipewire"},
 #endif
+#if SSR_USE_PORTAL
+	{PageInput::VIDEO_BACKEND_WAYLAND, "wayland"},
+#endif
 };
 
 ENUMSTRINGS(PageInput::enum_video_x11_area) = {
@@ -287,9 +290,6 @@ PageInput::PageInput(MainWindow* main_window)
 
 	m_grabbing = false;
 	m_selecting_window = false;
-#if SSR_USE_PIPEWIRE && SSR_USE_PORTAL
-	m_portal_fd = -1;
-#endif
 
 	HiddenScrollArea *scrollarea = new HiddenScrollArea(this);
 	QWidget *scrollarea_contents = new QWidget(scrollarea);
@@ -309,7 +309,10 @@ PageInput::PageInput(MainWindow* main_window)
 			m_combobox_video_backend->addItem("V4L2");
 #endif
 #if SSR_USE_PIPEWIRE
-			m_combobox_video_backend->addItem("PipeWire");
+			m_combobox_video_backend->addItem(tr("PipeWire (manual)"));
+#endif
+#if SSR_USE_PORTAL
+			m_combobox_video_backend->addItem(tr("Wayland"));
 #endif
 			m_combobox_video_backend->setToolTip(tr("The video backend that will be used for recording."));
 			m_buttongroup_video_x11_area = new QButtonGroup(groupbox_video);
@@ -387,9 +390,8 @@ PageInput::PageInput(MainWindow* main_window)
 			m_spinbox_video_pipewire_height->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 			m_spinbox_video_pipewire_height->setToolTip(tr("The height of the video."));
 #if SSR_USE_PORTAL
-			m_pushbutton_video_pipewire_portal = new QPushButton(tr("Select Screen/Window (Wayland)..."), groupbox_video);
-			m_pushbutton_video_pipewire_portal->setToolTip(tr("Ask the desktop portal to let you pick a screen or window to record. "
-			                                                  "This is the recommended way to select a source under Wayland."));
+			m_pushbutton_video_pipewire_portal = new QPushButton(tr("Select screen/window..."), groupbox_video);
+			m_pushbutton_video_pipewire_portal->setToolTip(tr("Select a screen or window to record."));
 			m_label_video_pipewire_portal_status = new QLabel(groupbox_video);
 			m_label_video_pipewire_portal_status->setWordWrap(true);
 #endif
@@ -439,9 +441,9 @@ PageInput::PageInput(MainWindow* main_window)
 			connect(m_pushbutton_video_opengl_settings, SIGNAL(clicked()), this, SLOT(OnGLInjectDialog()));
 #endif
 #if SSR_USE_PIPEWIRE && SSR_USE_PORTAL
+			connect(m_checkbox_record_cursor, SIGNAL(toggled(bool)), this, SLOT(OnWaylandCursorChanged()));
 			connect(m_pushbutton_video_pipewire_portal, SIGNAL(clicked()), this, SLOT(OnSelectPipeWireSourcePortal()));
-			connect(m_lineedit_video_pipewire_source, SIGNAL(textEdited(QString)), this, SLOT(OnPipeWireSourceTextEdited()));
-			connect(XdgDesktopPortal::GetInstance(), SIGNAL(SourceReady(int,quint32,int,int)), this, SLOT(OnPipeWireSourceReady(int,quint32,int,int)));
+			connect(XdgDesktopPortal::GetInstance(), SIGNAL(SourceReady()), this, SLOT(OnPipeWireSourceReady()));
 			connect(XdgDesktopPortal::GetInstance(), SIGNAL(SourceCancelled()), this, SLOT(OnPipeWireSourceCancelled()));
 			connect(XdgDesktopPortal::GetInstance(), SIGNAL(SourceFailed(QString)), this, SLOT(OnPipeWireSourceFailed(QString)));
 #endif
@@ -520,6 +522,8 @@ PageInput::PageInput(MainWindow* main_window)
 				layout2->addWidget(m_label_video_pipewire_height, 1, 2);
 				layout2->addWidget(m_spinbox_video_pipewire_height, 1, 3);
 			}
+#endif
+			layout->addWidget(m_checkbox_record_cursor);
 #if SSR_USE_PORTAL
 			{
 				QHBoxLayout *layout2 = new QHBoxLayout();
@@ -528,7 +532,6 @@ PageInput::PageInput(MainWindow* main_window)
 				layout2->addStretch();
 			}
 			layout->addWidget(m_label_video_pipewire_portal_status);
-#endif
 #endif
 			{
 				QGridLayout *layout2 = new QGridLayout();
@@ -545,7 +548,6 @@ PageInput::PageInput(MainWindow* main_window)
 				layout2->addWidget(m_label_video_scaled_height, 0, 2);
 				layout2->addWidget(m_spinbox_video_scaled_height, 0, 3);
 			}
-			layout->addWidget(m_checkbox_record_cursor);
 		}
 		QGroupBox *groupbox_audio = new QGroupBox(tr("Audio input"), scrollarea_contents);
 		{
@@ -693,16 +695,6 @@ PageInput::PageInput(MainWindow* main_window)
 	OnUpdateAudioFields();
 
 }
-
-#if SSR_USE_PORTAL
-PageInput::~PageInput() {
-	// release an unused portal-granted fd (e.g. selected but recording was never started)
-	if(m_portal_fd >= 0) {
-		::close(m_portal_fd);
-		m_portal_fd = -1;
-	}
-}
-#endif
 
 void PageInput::LoadSettings(QSettings* settings) {
 	SetProfile(m_profile_box->FindProfile(settings->value("input/profile", QString()).toString()));
@@ -1179,17 +1171,21 @@ void PageInput::OnUpdateVideoAreaFields() {
 		{{
 			m_label_video_pipewire_source, m_lineedit_video_pipewire_source,
 			m_label_video_pipewire_width, m_label_video_pipewire_height, m_spinbox_video_pipewire_width, m_spinbox_video_pipewire_height,
-#if SSR_USE_PORTAL
-			m_pushbutton_video_pipewire_portal, m_label_video_pipewire_portal_status,
-#endif
 		}, (backend == VIDEO_BACKEND_PIPEWIRE)},
 #endif
-	});
-#if SSR_USE_OPENGL_RECORDING
-	GroupEnabled({m_checkbox_record_cursor}, (backend == VIDEO_BACKEND_X11 || backend == VIDEO_BACKEND_GLINJECT));
-#else
-	GroupEnabled({m_checkbox_record_cursor}, (backend == VIDEO_BACKEND_X11));
+#if SSR_USE_PORTAL
+		{{m_pushbutton_video_pipewire_portal}, (backend == VIDEO_BACKEND_WAYLAND)},
+		{{m_label_video_pipewire_portal_status}, (backend == VIDEO_BACKEND_WAYLAND && !m_label_video_pipewire_portal_status->text().isEmpty())},
 #endif
+	});
+	GroupEnabled({m_checkbox_record_cursor}, (backend == VIDEO_BACKEND_X11
+#if SSR_USE_OPENGL_RECORDING
+		|| backend == VIDEO_BACKEND_GLINJECT
+#endif
+#if SSR_USE_PORTAL
+		|| backend == VIDEO_BACKEND_WAYLAND
+#endif
+	));
 	if(GetVideoBackend() == VIDEO_BACKEND_X11) {
 		switch(GetVideoX11Area()) {
 			case VIDEO_X11_AREA_SCREEN: {
@@ -1360,54 +1356,36 @@ void PageInput::OnGLInjectDialog() {
 
 #if SSR_USE_PIPEWIRE
 #if SSR_USE_PORTAL
-int PageInput::TakeVideoPipeWireFd() {
-	if(m_portal_fd < 0)
-		return -1;
-	if(m_portal_node_id != m_lineedit_video_pipewire_source->text())
-		return -1; // the field was edited since the portal selection, the fd no longer matches
-	int fd = m_portal_fd;
-	m_portal_fd = -1;
-	return fd;
+void PageInput::SetWaylandStatus(const QString& text) {
+	m_label_video_pipewire_portal_status->setText(text);
+	m_label_video_pipewire_portal_status->setVisible(GetVideoBackend() == VIDEO_BACKEND_WAYLAND && !text.isEmpty());
 }
 
 void PageInput::OnSelectPipeWireSourcePortal() {
-	m_label_video_pipewire_portal_status->setText(tr("Waiting for the desktop portal ..."));
-	XdgDesktopPortal::GetInstance()->RequestSource(XdgDesktopPortal::SOURCETYPE_ANY);
+	SetWaylandStatus(tr("Waiting for the desktop portal ..."));
+	XdgDesktopPortal::GetInstance()->RequestSource(m_main_window, XdgDesktopPortal::SOURCETYPE_ANY, GetVideoRecordCursor());
 }
 
-void PageInput::OnPipeWireSourceReady(int pipewire_fd, quint32 node_id, int width, int height) {
-	// replace any previous unused fd
-	if(m_portal_fd >= 0)
-		::close(m_portal_fd);
-	m_portal_fd = pipewire_fd;
-	m_portal_node_id = QString::number(node_id);
-	m_lineedit_video_pipewire_source->setText(m_portal_node_id);
-	if(width > 0 && height > 0) {
-		// Only even width/height are allowed; round down like the rest of SSR does.
-		m_spinbox_video_pipewire_width->setValue((unsigned int) width / 2 * 2);
-		m_spinbox_video_pipewire_height->setValue((unsigned int) height / 2 * 2);
+void PageInput::OnWaylandCursorChanged() {
+	XdgDesktopPortal *portal = XdgDesktopPortal::GetInstance();
+	if(GetVideoBackend() == VIDEO_BACKEND_WAYLAND && portal->IsActive() && portal->GetRecordCursor() != GetVideoRecordCursor()) {
+		SetWaylandStatus(tr("Updating cursor setting ..."));
+		portal->RequestSource(m_main_window, XdgDesktopPortal::SOURCETYPE_ANY, GetVideoRecordCursor(), true);
 	}
-	m_label_video_pipewire_portal_status->setText(tr("Source selected (PipeWire node %1). The exact video size will be "
-	                                                  "negotiated when recording or previewing starts.").arg(node_id));
+}
+
+void PageInput::OnPipeWireSourceReady() {
+	SetWaylandStatus(tr("Screen/window selected."));
 }
 
 void PageInput::OnPipeWireSourceCancelled() {
-	m_label_video_pipewire_portal_status->setText(QString());
+	SetWaylandStatus(QString());
 }
 
 void PageInput::OnPipeWireSourceFailed(QString error_message) {
-	m_label_video_pipewire_portal_status->setText(tr("Error: %1").arg(error_message));
+	SetWaylandStatus(tr("Error: %1").arg(error_message));
 }
 
-void PageInput::OnPipeWireSourceTextEdited() {
-	// the field no longer (necessarily) refers to the portal-granted node, release the fd
-	if(m_portal_fd >= 0) {
-		::close(m_portal_fd);
-		m_portal_fd = -1;
-	}
-	m_portal_node_id.clear();
-	m_label_video_pipewire_portal_status->setText(QString());
-}
 #endif
 #endif
 

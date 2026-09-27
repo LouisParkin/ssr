@@ -298,6 +298,13 @@ void PipeWireInput::InputThread() {
 		Logger::LogInfo("[PipeWireInput::InputThread] " + Logger::tr("Input thread started."));
 
 		struct pw_loop *loop = pw_main_loop_get_loop(m_loop);
+		// Release the loop's thread ownership even when a callback throws.
+		// Cleanup runs on the GUI thread after this thread has joined.
+		pw_loop_enter(loop);
+		struct LoopGuard {
+			pw_loop *loop;
+			~LoopGuard() { pw_loop_leave(loop); }
+		} loop_guard{loop};
 
 		while(!m_should_stop) {
 			int result = pw_loop_iterate(loop, 100);
