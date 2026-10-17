@@ -39,6 +39,9 @@ PipeWireInput::PipeWireInput(const QString& node_id, unsigned int width, unsigne
 	m_colorspace = SWS_CS_DEFAULT;
 	m_buffers = 4;
 	m_format_known = false;
+	m_frame_seen = false;
+	m_crop_width = 0;
+	m_crop_height = 0;
 
 	m_loop = nullptr;
 	m_context = nullptr;
@@ -77,6 +80,9 @@ PipeWireInput::PipeWireInput(int portal_fd, uint32_t node_id, unsigned int width
 	m_colorspace = SWS_CS_DEFAULT;
 	m_buffers = 4;
 	m_format_known = false;
+	m_frame_seen = false;
+	m_crop_width = 0;
+	m_crop_height = 0;
 
 	m_loop = nullptr;
 	m_context = nullptr;
@@ -121,8 +127,21 @@ PipeWireInput::~PipeWireInput() {
 
 void PipeWireInput::GetCurrentSize(unsigned int *width, unsigned int *height) {
 	std::lock_guard<std::mutex> lock(m_format_mutex);
-	*width = m_width;
-	*height = m_height;
+	if(m_crop_width != 0 && m_crop_height != 0) {
+		*width = m_crop_width;
+		*height = m_crop_height;
+	} else {
+		*width = m_width;
+		*height = m_height;
+	}
+}
+
+bool PipeWireInput::WaitUntilFrameSeen(unsigned int timeout_ms) {
+	std::unique_lock<std::mutex> lock(m_format_mutex);
+	m_format_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this]() {
+		return m_frame_seen || m_error_occurred.load();
+	});
+	return m_frame_seen;
 }
 
 bool PipeWireInput::WaitUntilFormatKnown(unsigned int timeout_ms) {
@@ -333,6 +352,34 @@ void PipeWireInput::InputThread() {
 	}
 }
 
+// Offsets the plane pointers so that they point at (x, y). Returns false for
+// pixel formats or offsets that can't be cropped by pointer arithmetic.
+static bool ApplyCrop(AVPixelFormat format, unsigned int x, unsigned int y, uint32_t n_planes, const uint8_t** data, const int* stride) {
+	unsigned int bytes_per_pixel, chroma_shift_x = 0, chroma_shift_y = 0;
+	bool planar = false;
+	switch(format) {
+		case AV_PIX_FMT_BGRA: case AV_PIX_FMT_RGBA: bytes_per_pixel = 4; break;
+		case AV_PIX_FMT_BGR24: case AV_PIX_FMT_RGB24: bytes_per_pixel = 3; break;
+		case AV_PIX_FMT_YUYV422: bytes_per_pixel = 2; chroma_shift_x = 1; break;
+		case AV_PIX_FMT_YUV444P: bytes_per_pixel = 1; planar = true; break;
+		case AV_PIX_FMT_YUV422P: bytes_per_pixel = 1; planar = true; chroma_shift_x = 1; break;
+		case AV_PIX_FMT_YUV420P: case AV_PIX_FMT_NV12: bytes_per_pixel = 1; planar = true; chroma_shift_x = 1; chroma_shift_y = 1; break;
+		default: return false;
+	}
+	if(n_planes == 0 || (x & ((1u << chroma_shift_x) - 1)) != 0 || (y & ((1u << chroma_shift_y) - 1)) != 0)
+		return false;
+	data[0] += (size_t) y * (size_t) stride[0] + (size_t) x * bytes_per_pixel;
+	if(planar) {
+		for(uint32_t i = 1; i < n_planes; ++i) {
+			unsigned int cx = x >> chroma_shift_x, cy = y >> chroma_shift_y;
+			if(format == AV_PIX_FMT_NV12)
+				cx *= 2; // interleaved chroma samples
+			data[i] += (size_t) cy * (size_t) stride[i] + cx;
+		}
+	}
+	return true;
+}
+
 void PipeWireInput::OnProcess(void *userdata) {
 	PipeWireInput *input = static_cast<PipeWireInput*>(userdata);
 	pw_buffer *b;
@@ -361,12 +408,27 @@ void PipeWireInput::OnProcess(void *userdata) {
 	}
 
 	int64_t timestamp = hrt_time_micro();
+
+	// Some compositors (e.g. GNOME's Mutter) queue buffers that carry no new
+	// video content, such as cursor-only updates, with a zero-sized chunk that
+	// is flagged as corrupted. Treat those as "no new frame" instead of pushing
+	// stale buffer contents.
+	spa_meta_header *header = (spa_meta_header*) spa_buffer_find_meta_data(buf, SPA_META_Header, sizeof(spa_meta_header));
+	if((header != nullptr && (header->flags & SPA_META_HEADER_FLAG_CORRUPTED)) ||
+	   (buf->datas[0].chunk->flags & SPA_CHUNK_FLAG_CORRUPTED) || buf->datas[0].chunk->size == 0) {
+		input->PushVideoPing(timestamp);
+		return;
+	}
+
 	++input->m_frame_counter;
 
 	AVPixelFormat pixel_format;
+	unsigned int width, height;
 	{
 		std::lock_guard<std::mutex> lock(input->m_format_mutex);
 		pixel_format = input->m_pixel_format;
+		width = input->m_width;
+		height = input->m_height;
 	}
 
 	if(pixel_format == AV_PIX_FMT_NONE) {
@@ -389,8 +451,42 @@ void PipeWireInput::OnProcess(void *userdata) {
 		image_data[i] = (uint8_t*) buf->datas[i].data + chunk->offset;
 		image_stride[i] = chunk->stride;
 	}
+
+	// Apply the crop region if the compositor provides one. Mutter uses
+	// monitor-sized buffers for window capture and reports the real window
+	// bounds through SPA_META_VideoCrop.
+	unsigned int crop_width = 0, crop_height = 0;
+	spa_meta_region *crop = (spa_meta_region*) spa_buffer_find_meta_data(buf, SPA_META_VideoCrop, sizeof(spa_meta_region));
+	if(crop != nullptr && spa_meta_region_is_valid(crop)) {
+		int32_t x = crop->region.position.x, y = crop->region.position.y;
+		uint32_t w = crop->region.size.width, h = crop->region.size.height;
+		if(x >= 0 && y >= 0 && (uint64_t) x + w <= width && (uint64_t) y + h <= height &&
+		   ApplyCrop(pixel_format, (unsigned int) x, (unsigned int) y, buf->n_datas, image_data.data(), image_stride.data())) {
+			crop_width = w;
+			crop_height = h;
+			width = w;
+			height = h;
+		}
+	}
+
+	bool first_frame;
+	{
+		std::lock_guard<std::mutex> lock(input->m_format_mutex);
+		first_frame = !input->m_frame_seen;
+		input->m_crop_width = crop_width;
+		input->m_crop_height = crop_height;
+		input->m_frame_seen = true;
+	}
+	input->m_format_cv.notify_all();
+	if(first_frame) {
+		Logger::LogInfo("[PipeWireInput::OnProcess] " + Logger::tr("First frame: %1x%2, header metadata: %3, crop region: %4")
+			.arg(width).arg(height)
+			.arg((header != nullptr)? "yes" : "no")
+			.arg((crop_width != 0)? QString("%1x%2 at (%3,%4)").arg(crop_width).arg(crop_height).arg(crop->region.position.x).arg(crop->region.position.y) : "none"));
+	}
+
 	input->PushVideoFrame(
-		input->m_width, input->m_height,
+		width, height,
 		image_data.data(), image_stride.data(),
 		pixel_format, input->m_colorspace, timestamp);
 
@@ -452,6 +548,22 @@ void PipeWireInput::OnParamChange(void *userdata, uint32_t id, const struct spa_
 		input->m_format_known = true;
 	}
 	input->m_format_cv.notify_all();
+
+	// Ask the producer for the buffer metadata we understand (see OnProcess).
+	{
+		uint8_t buffer[512];
+		spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+		const struct spa_pod *params[2];
+		params[0] = (const struct spa_pod*) spa_pod_builder_add_object(&b,
+			SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
+			SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
+			SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_header)));
+		params[1] = (const struct spa_pod*) spa_pod_builder_add_object(&b,
+			SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
+			SPA_PARAM_META_type, SPA_POD_Id(SPA_META_VideoCrop),
+			SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_region)));
+		pw_stream_update_params(input->m_stream, params, 2);
+	}
 
 	Logger::LogInfo("[PipeWireInput::OnParamChange] " + Logger::tr("Video format: %1x%2 %3")
 		.arg(info.info.raw.size.width)

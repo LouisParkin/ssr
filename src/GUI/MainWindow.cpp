@@ -71,8 +71,15 @@ MainWindow::MainWindow()
 	QShortcut *shortcut = new QShortcut(QKeySequence::Close, this);
 	connect(shortcut, SIGNAL(activated()), this, SLOT(close()));
 
-	// warning for non-X11 window systems (e.g. Wayland)
-	if(!IsPlatformX11()) {
+	// warning for non-X11 window systems (e.g. Wayland), unless a PipeWire-based backend is already selected
+	bool pipewire_backend = false;
+#if SSR_USE_PIPEWIRE
+	pipewire_backend = pipewire_backend || (m_page_input->GetVideoBackend() == PageInput::VIDEO_BACKEND_PIPEWIRE);
+#endif
+#if SSR_USE_PORTAL
+	pipewire_backend = pipewire_backend || (m_page_input->GetVideoBackend() == PageInput::VIDEO_BACKEND_WAYLAND);
+#endif
+	if(!IsPlatformX11() && !pipewire_backend) {
 		MessageBox(QMessageBox::Warning, NULL, MainWindow::WINDOW_CAPTION,
 				   MainWindow::tr("You are using a non-X11 window system (e.g. Wayland) which is only partially supported by SimpleScreenRecorder. "
 								  "Several features will most likely not work properly, consider choosing a X11/Xorg session at the login screen if you experience issues. "

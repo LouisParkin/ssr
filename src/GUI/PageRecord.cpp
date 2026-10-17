@@ -598,6 +598,12 @@ void PageRecord::WaitForPipeWireFormat() {
 			: tr("Error: Timed out while waiting for the PipeWire video format.")));
 		throw PipeWireException();
 	}
+	// Wait briefly for the first frame so that a crop region reported by the
+	// compositor (e.g. window capture on GNOME) is reflected in the size.
+	for(unsigned int i = 0; i < 50 && !m_pipewire_input->WaitUntilFrameSeen(20); ++i) {
+		if(dialog.isVisible())
+			QCoreApplication::processEvents();
+	}
 	m_pipewire_input->GetCurrentSize(&m_video_in_width, &m_video_in_height);
 }
 #endif
@@ -874,7 +880,7 @@ void PageRecord::StartPage() {
 		else if(portal->HasSource())
 			OnWaylandSourceReady();
 		else if(!portal->IsActive())
-			portal->RequestSource(m_main_window, XdgDesktopPortal::SOURCETYPE_ANY, m_video_record_cursor);
+			portal->RequestSource(m_main_window, XdgDesktopPortal::SOURCETYPE_ANY, m_video_record_cursor, true); // reuse the previous selection when the portal allows it
 	}
 #endif
 

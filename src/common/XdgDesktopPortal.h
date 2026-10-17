@@ -77,6 +77,7 @@ private:
 	enum_state m_state;
 	bool m_record_cursor;
 	QString m_restore_token; // single-use token retained only while SSR runs
+	QString m_persisted_restore_token; // last token granted by the portal, saved in the settings so later runs can skip the dialog
 	QString m_requested_restore_token;
 	PortalParent *m_parent = NULL;
 	uint m_requested_types; // bitmask of enum_sourcetype values
@@ -100,6 +101,9 @@ public:
 	// The result is delivered asynchronously through the signals below.
 	void RequestSource(QWidget *parent_window, uint types, bool record_cursor, bool restore = false);
 	inline bool GetRecordCursor() { return m_record_cursor; }
+
+	inline QString GetPersistedRestoreToken() { return m_persisted_restore_token; }
+	inline void SetPersistedRestoreToken(const QString& token) { m_persisted_restore_token = token; }
 
 	// Cancels any request in progress and closes the active session (if any).
 	void Cancel();
