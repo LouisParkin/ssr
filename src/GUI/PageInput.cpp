@@ -735,6 +735,12 @@ void PageInput::LoadProfileSettings(QSettings* settings) {
 
 	// load settings
 	SetVideoBackend(StringToEnum(settings->value("input/video_backend", QString()).toString(), VIDEO_BACKEND_X11));
+#if SSR_USE_PORTAL
+	// On a Wayland session the X11 backend can only see XWayland clients and
+	// records a black screen, so default to the portal-based Wayland backend.
+	if(GetVideoBackend() == VIDEO_BACKEND_X11 && !IsPlatformX11())
+		SetVideoBackend(VIDEO_BACKEND_WAYLAND);
+#endif
 	SetVideoX11Area(StringToEnum(settings->value("input/video_x11_area", QString()).toString(), VIDEO_X11_AREA_SCREEN));
 	SetVideoX11Screen(settings->value("input/video_x11_screen", 0).toUInt());
 	SetVideoX11FollowFullscreen(settings->value("input/video_x11_follow_fullscreen", false).toBool());
