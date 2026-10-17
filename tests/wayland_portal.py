@@ -88,7 +88,7 @@ class Portal(dbus.service.Object):
     def SelectSources(self, session, options, sender):
         assert options['types'] == 3
         assert options['cursor_mode'] == 2
-        assert options['persist_mode'] == 1
+        assert options['persist_mode'] == 2
         path, req = self.request(sender, options)
         if self.creates == 1:
             GLib.timeout_add(20, lambda: self.session.Closed({}))

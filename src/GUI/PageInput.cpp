@@ -751,6 +751,9 @@ void PageInput::LoadProfileSettings(QSettings* settings) {
 	SetVideoPipeWireSource(settings->value("input/video_pipewire_source", "").toString()); // TODO
 	SetVideoPipeWireWidth(settings->value("input/video_pipewire_width", 800).toUInt());
 	SetVideoPipeWireHeight(settings->value("input/video_pipewire_height", 600).toUInt());
+#if SSR_USE_PORTAL
+	XdgDesktopPortal::GetInstance()->SetPersistedRestoreToken(settings->value("input/video_wayland_restore_token", "").toString());
+#endif
 #endif
 	SetVideoFrameRate(settings->value("input/video_frame_rate", 30).toUInt());
 	SetVideoScalingEnabled(settings->value("input/video_scale", false).toBool());
@@ -804,6 +807,9 @@ void PageInput::SaveProfileSettings(QSettings* settings) {
 	settings->setValue("input/video_pipewire_source", GetVideoPipeWireSource());
 	settings->setValue("input/video_pipewire_width", GetVideoPipeWireWidth());
 	settings->setValue("input/video_pipewire_height", GetVideoPipeWireHeight());
+#if SSR_USE_PORTAL
+	settings->setValue("input/video_wayland_restore_token", XdgDesktopPortal::GetInstance()->GetPersistedRestoreToken());
+#endif
 #endif
 	settings->setValue("input/video_frame_rate", GetVideoFrameRate());
 	settings->setValue("input/video_scale", GetVideoScalingEnabled());

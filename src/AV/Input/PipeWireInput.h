@@ -58,6 +58,8 @@ private:
 	std::mutex m_format_mutex;
 	std::condition_variable m_format_cv;
 	bool m_format_known;
+	bool m_frame_seen; // set once the first usable frame has been processed
+	unsigned int m_crop_width, m_crop_height; // size reported by SPA_META_VideoCrop (0 = no crop)
 
 	pw_main_loop *m_loop;
 	pw_context *m_context;
@@ -94,6 +96,13 @@ public:
 	// is known. This function is thread-safe, but must not be called from the
 	// PipeWire thread itself.
 	bool WaitUntilFormatKnown(unsigned int timeout_ms);
+
+	// Blocks until the first usable frame has been processed (so GetCurrentSize
+	// reflects a crop region reported by the compositor, e.g. for window capture
+	// on GNOME), an error occurs, or the timeout elapses. Returns whether a frame
+	// has been seen. This function is thread-safe, but must not be called from
+	// the PipeWire thread itself.
+	bool WaitUntilFrameSeen(unsigned int timeout_ms);
 
 	// Returns the total number of captured frames.
 	// This function is thread-safe.

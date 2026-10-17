@@ -117,6 +117,8 @@ void XdgDesktopPortal::RequestSource(QWidget *parent_window, uint types, bool re
 	QString restore_token;
 	if(restore)
 		restore_token = !m_restore_token.isEmpty() ? m_restore_token : m_requested_restore_token;
+	if(restore && restore_token.isEmpty())
+		restore_token = m_persisted_restore_token;
 
 	// cancel/close anything that was in progress before
 	Cancel();
@@ -248,7 +250,7 @@ void XdgDesktopPortal::CallSelectSources() {
 	options.insert(QStringLiteral("multiple"), false);
 	options.insert(QStringLiteral("cursor_mode"), cursor_mode);
 	if(version >= 4) {
-		options.insert(QStringLiteral("persist_mode"), 1u); // this application lifetime only
+		options.insert(QStringLiteral("persist_mode"), 2u); // persist until revoked, so later runs can skip the dialog
 		if(!m_requested_restore_token.isEmpty())
 			options.insert(QStringLiteral("restore_token"), m_requested_restore_token);
 	}
@@ -389,6 +391,8 @@ void XdgDesktopPortal::OnStartResponse(uint response, const QVariantMap& results
 	}
 
 	m_restore_token = results.value(QStringLiteral("restore_token")).toString();
+	if(!m_restore_token.isEmpty())
+		m_persisted_restore_token = m_restore_token;
 	m_node_id = node_id;
 	m_state = STATE_READY;
 	emit SourceReady();
